@@ -1,7 +1,15 @@
 import numpy as np
 import pandas as pd
+import ML_model_clusters
 
-data = pd.read_csv("output.csv")
+data= ML_model_clusters.cluster_data(7)
+data.plot(type_plot="lineplot")
+data = pd.read_csv("Data/output_renset.csv")
+
+
+
+
+
 
 def data_cleaning(input_list):
     return len(input_list) == 25 and not "0" in input_list
@@ -122,31 +130,32 @@ new_labels = [cluster_names.get(int(label), f'Cluster {label}') for label in lab
 ax.legend(handles, new_labels, title='Cluster', bbox_to_anchor=(1.05, 1), loc='upper left')
 plt.tight_layout()
 plt.show()
+def boxplot(data,farve,navn):
 
-# Plot 2: Normalized distribution of clusters within each party
-plt.figure(figsize=(14, 8))
-party_cluster_normalized = party_cluster_counts.div(party_cluster_counts.sum(axis=1), axis=0)
+    # Plot 2: Normalized distribution of clusters within each party
+    plt.figure(figsize=(14, 8))
+    party_cluster_normalized = party_cluster_counts.div(party_cluster_counts.sum(axis=1), axis=0)
 
-# Plot each cluster as a separate bar
-bottom = np.zeros(len(party_cluster_normalized))
-for cluster in party_cluster_normalized.columns:
-    plt.bar(
-        party_cluster_normalized.index,
-        party_cluster_normalized[cluster],
-        bottom=bottom,
-        label=cluster_names.get(cluster, f'Cluster {cluster}'),
-        color=cluster_colors.get(cluster, 'gray')
-    )
-    bottom += party_cluster_normalized[cluster]
+    # Plot each cluster as a separate bar
+    bottom = np.zeros(len(party_cluster_normalized))
+    for cluster in party_cluster_normalized.columns:
+        plt.bar(
+            party_cluster_normalized.index,
+            party_cluster_normalized[cluster],
+            bottom=bottom,
+            label=cluster_names.get(cluster, f'Cluster {cluster}'),
+            color=cluster_colors.get(cluster, 'gray')
+        )
+        bottom += party_cluster_normalized[cluster]
 
-# Customize the plot
-plt.title('Normalized Distribution of Clusters Within Each Party', fontsize=14, pad=20)
-plt.xlabel('Party Code', fontsize=12)
-plt.ylabel('Proportion', fontsize=12)
-plt.xticks(rotation=45, ha='right')
-plt.legend(title='Cluster', bbox_to_anchor=(1.05, 1), loc='upper left')
-plt.tight_layout()
-plt.show()
+    # Customize the plot
+    plt.title('Normalized Distribution of Clusters Within Each Party', fontsize=14, pad=20)
+    plt.xlabel('Party Code', fontsize=12)
+    plt.ylabel('Proportion', fontsize=12)
+    plt.xticks(rotation=45, ha='right')
+    plt.legend(title='Cluster', bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+    plt.show()
 
 
 # Plot the average response per question for each cluster
