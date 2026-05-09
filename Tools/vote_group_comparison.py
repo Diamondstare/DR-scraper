@@ -5,9 +5,212 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Any, TypeVar
-
 from scipy import stats
+from functools import wraps
 
+from dataclasses import field
+
+@dataclass
+class candidate:
+    party_code: str
+    votes: int
+    storkreds: str
+    name: str = ""
+    adtional_values: dict[str, Any] = field(default_factory=dict)
+
+    def __str__(self):
+        return self.name
+
+
+def filter_candidate(func):
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        result = func(self, *args, **kwargs)
+        if not self.__filter(result):
+            raise ValueError(f"Candidate '{result.name}' is filtered out")
+        return result
+    return wrapper
+
+
+class xml_reader():
+    def __init__(self,filter=lambda x:True):
+        self.__voting_place_reults = {}
+        self.__all_candidate_names_cache = None
+        self.__candidate_cache = {}
+        self.__filter=filter
+        
+    def get_candidate_votes(self, candidate):
+        total_votes = 0
+        base_path = Path("Data/dst_xml_downloads/Afstemningsomraader")
+        
+        for voting_place_dir in base_path.iterdir():
+            if voting_place_dir.is_dir():
+                votes_by_name = self.__read_voting_place(voting_place_dir.name)
+                normalized_candidate = self.__normalize_name(candidate)
+                total_votes += votes_by_name.get(normalized_candidate, 0)
+        
+        return total_votes
+
+    def get_all_candidate_names(self):
+        if self.__all_candidate_names_cache is not None:
+            return self.__all_candidate_names_cache
+        
+        all_names = set()
+        base_path = Path("Data/dst_xml_downloads/Afstemningsomraader")
+        
+        for voting_place_dir in base_path.iterdir():
+            if voting_place_dir.is_dir():
+                votes_by_name = self.__read_voting_place(voting_place_dir.name)
+                for name in votes_by_name.keys():
+                    if self.__filter(name):
+                        all_names.add(name)
+        
+        self.__all_candidate_names_cache = list(all_names)
+        return self.__all_candidate_names_cache
+
+    @filter_candidate
+    def get_candidate(self, candidate_name):
+        normalized_name = self.__normalize_name(candidate_name)
+        if normalized_name in self.__candidate_cache:
+            return self.__candidate_cache[normalized_name]
+        
+        votes = self.get_candidate_votes(candidate_name)
+        party_code = self.__get_candidate_party_code(normalized_name)
+        storkreds = self.__get_candidate_storkreds(normalized_name)
+        candidate_instance = candidate(party_code=party_code, votes=votes, storkreds=storkreds,name=normalized_name)
+        self.__candidate_cache[normalized_name] = candidate_instance
+        return candidate_instance
+    
+    def __get_candidate_party_code(self, normalized_candidate_name):
+        base_path = Path("Data/dst_xml_downloads/Afstemningsomraader")
+        
+        for voting_place_dir in base_path.iterdir():
+            if voting_place_dir.is_dir():
+                xml_path = self.__voting_place_to_xml(voting_place_dir.name)
+                party_code = self.__extract_candidate_party_code(xml_path, normalized_candidate_name)
+                if party_code:
+                    return party_code
+        return ""
+    
+    def __get_candidate_storkreds(self, normalized_candidate_name):
+        base_path = Path("Data/dst_xml_downloads/Afstemningsomraader")
+        
+        for voting_place_dir in base_path.iterdir():
+            if voting_place_dir.is_dir():
+                xml_path = self.__voting_place_to_xml(voting_place_dir.name)
+                storkreds = self.__extract_candidate_storkreds(xml_path, normalized_candidate_name)
+                if storkreds:
+                    return storkreds
+        return ""
+    
+    def __read_voting_place(self, voting_place):
+        if voting_place in self.__voting_place_reults:
+            return self.__voting_place_reults[voting_place]
+        else:
+            votes_by_name: dict[str, int] = {}
+            xml_paths = self.__voting_place_to_xml(voting_place)
+            for xml_path in xml_paths:
+                for name, votes in self.__extract_points_from_xml(xml_path):
+                    key = self.__normalize_name(name)
+                    votes_by_name[key] = votes_by_name.get(key, 0) + votes
+            
+            self.__voting_place_reults[voting_place] = votes_by_name
+        
+        return votes_by_name
+   
+    def __voting_place_to_xml(self, voting_place):
+        base_path = Path("Data/dst_xml_downloads/Afstemningsomraader") / voting_place
+        xml_files = list(base_path.glob("*.xml"))
+        return xml_files
+    
+    def __extract_points_from_xml(self,xml_path: Path) -> list[tuple[str, int]]:
+        try:
+            tree = ET.parse(xml_path)
+            root = tree.getroot()
+        except ET.ParseError as e:
+            print(f"Skipping invalid XML: {xml_path} ({e})")
+            return []
+
+        points: list[tuple[str, int]] = []
+
+        for elem in root.iter():
+            if self.__local_name(elem.tag) == "Person":
+                name = extract_candidate_name(elem)
+                votes = extract_person_votes(elem)
+
+                if name:
+                    points.append((name, votes))
+            
+            elif self.__local_name(elem.tag) == "Parti":
+                if "Bogstav" not in elem.attrib:
+                    name = elem.attrib.get("navn", "")
+                    votes = int(elem.attrib.get("PersonligeStemmer", "0"))
+                    
+                    if name:
+                        points.append((name, votes))
+
+        return points
+
+    def __extract_candidate_party_code(self, xml_path: Path, normalized_candidate_name: str) -> str:
+        try:
+            tree = ET.parse(xml_path)
+            root = tree.getroot()
+        except ET.ParseError as e:
+            print(f"Skipping invalid XML: {xml_path} ({e})")
+            return ""
+
+        for parti_elem in root.iter():
+            if self.__local_name(parti_elem.tag) != "Parti":
+                continue
+            
+            party_code = parti_elem.attrib.get("Bogstav", "")
+            
+            # Check if this is a party with candidates
+            if party_code:
+                for person_elem in parti_elem.iter():
+                    if self.__local_name(person_elem.tag) != "Person":
+                        continue
+                    
+                    name = extract_candidate_name(person_elem)
+                    if name:
+                        normalized_name = self.__normalize_name(name)
+                        if normalized_name == normalized_candidate_name:
+                            return party_code
+            
+            # Check if this is an independent candidate (no Bogstav attribute)
+            else:
+                parti_name = parti_elem.attrib.get("navn", "")
+                if parti_name:
+                    normalized_parti_name = self.__normalize_name(parti_name)
+                    if normalized_parti_name == normalized_candidate_name:
+                        return ""
+        
+        return ""
+
+    def __extract_candidate_storkreds(self, xml_path: Path, normalized_candidate_name: str) -> str:
+        try:
+            tree = ET.parse(xml_path)
+            root = tree.getroot()
+        except ET.ParseError as e:
+            print(f"Skipping invalid XML: {xml_path} ({e})")
+            return ""
+
+        for sted_elem in root.iter():
+            if self.__local_name(sted_elem.tag) == "Sted":
+                return sted_elem.attrib.get("Type", "") + ": " + sted_elem.text or ""
+        
+        return ""
+    
+    def __normalize_name(self,name: str) -> str:
+        name = name.strip()
+        name = name.replace(".", "")
+        name = re.sub(r"\s+", " ", name)
+        return name.casefold()
+    
+    def __local_name(self,tag: str) -> str:
+        if "}" in tag:
+            return tag.split("}", 1)[1]
+        return tag
 T = TypeVar('T')
 
 
@@ -17,19 +220,6 @@ class Point:
     y: float
     label: str
     party_code: str
-
-
-def local_name(tag: str) -> str:
-    if "}" in tag:
-        return tag.split("}", 1)[1]
-    return tag
-
-
-def normalize_name(name: str) -> str:
-    name = name.strip()
-    name = name.replace(".", "")
-    name = re.sub(r"\s+", " ", name)
-    return name.casefold()
 
 
 def read_csv_rows(csv_path: Path) -> list[dict[str, str]]:
@@ -51,38 +241,6 @@ def extract_candidate_name(elem: ET.Element) -> str:
     return (elem.attrib.get("Navn", "") or "").strip()
 
 
-def extract_points_from_xml(xml_path: Path) -> list[tuple[str, int]]:
-    try:
-        tree = ET.parse(xml_path)
-        root = tree.getroot()
-    except ET.ParseError as e:
-        print(f"Skipping invalid XML: {xml_path} ({e})")
-        return []
-
-    points: list[tuple[str, int]] = []
-
-    for elem in root.iter():
-        if local_name(elem.tag) != "Person":
-            continue
-
-        name = extract_candidate_name(elem)
-        votes = extract_person_votes(elem)
-
-        if name:
-            points.append((name, votes))
-
-    return points
-
-
-def read_xml_votes(folder: Path) -> dict[str, int]:
-    votes_by_name: dict[str, int] = {}
-
-    for xml_file in folder.rglob("*.xml"):
-        for name, votes in extract_points_from_xml(xml_file):
-            key = normalize_name(name)
-            votes_by_name[key] = votes_by_name.get(key, 0) + votes
-
-    return votes_by_name
 
 
 def build_points(
@@ -122,7 +280,7 @@ def build_points(
     return points
 
 
-def extract_question3_answer(answers_text: str) -> int | None:
+def extract_question3_answer(answers_text: str):
     answers = answers_text.split()
     if len(answers) < 3:
         return None
