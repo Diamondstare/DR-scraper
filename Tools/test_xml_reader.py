@@ -1,7 +1,7 @@
 import sys
 sys.path.insert(0, 'Tools')
 
-from vote_group_comparison import xml_reader
+from vote_group_comparison import xml_reader, CandidateGrouping
 
 def test_katrine_kjaer_robsue_votes():
     reader = xml_reader()
@@ -63,6 +63,78 @@ def test_mette_frederiksen_votes():
     assert votes == 41721, f"Expected Mette Frederiksen to have 41721 votes, but got {votes}"
     print("Test passed: Mette Frederiksen has 41721 votes")
 
+
+def test_a_vs_aa_vote_difference():
+    """Test if A candidates get more votes than Å candidates with p-value < 0.05"""
+    reader = xml_reader()
+    grouper = CandidateGrouping(xml_reader_instance=reader)
+    
+    # Add filters for party A and Å
+    grouper.add_filter(lambda c: c.party_code == 'A', name='A')
+    grouper.add_filter(lambda c: c.party_code == 'Å', name='Å')
+    
+    # Test the vote difference
+    results = grouper.test_filter_vote_difference('A')
+    
+    # Check if Å is in the results and has a p-value < 0.05
+    assert 'Å' in results, "Å group not found in results"
+    assert results['Å']['p_value'] is not None, "P-value for Å comparison is None"
+    assert results['Å']['p_value'] < 0.05, f"P-value {results['Å']['p_value']} is not < 0.05"
+    print(f"Test passed: A candidates get more votes than Å candidates (p-value: {results['Å']['p_value']:.6f})")
+
+
+def test_a_vs_a_same_party():
+    """Test that A candidates compared with A candidates have p-value of 1"""
+    reader = xml_reader()
+    grouper = CandidateGrouping(xml_reader_instance=reader)
+    
+    # Add the same filter for party A with two different names
+    grouper.add_filter(lambda c: c.party_code == 'A', name='A_group1')
+    grouper.add_filter(lambda c: c.party_code == 'A', name='A_group2')
+    
+    # Test the vote difference between the two identical A groups
+    results = grouper.test_filter_vote_difference('A_group1')
+    
+    # Check if A_group2 is in the results
+    assert 'A_group2' in results, "A_group2 not found in results"
+    assert results['A_group2']['p_value'] is not None, "P-value for A_group2 comparison is None"
+    assert results['A_group2']['p_value'] == 1, f"P-value {results['A_group2']['p_value']} should be close to 1 for identical groups"
+    print(f"Test passed: A candidates vs A candidates have high p-value: {results['A_group2']['p_value']:.6f}")
+
+def test_a_vs_a_same_party_under1000():
+    """Test that A candidates compared with A candidates have p-value of 1"""
+    grouper = CandidateGrouping()
+    
+    # Add the same filter for party A with two different names
+    grouper.add_filter(lambda c: c.party_code == 'A', name='A_group1')
+    grouper.add_filter(lambda c: c.party_code == 'A', name='A_group2')
+    
+    # Test the vote difference between the two identical A groups
+    results = grouper.test_filter_vote_difference('A_group1')
+    
+    # Check if A_group2 is in the results
+    assert 'A_group2' in results, "A_group2 not found in results"
+    assert results['A_group2']['p_value'] is not None, "P-value for A_group2 comparison is None"
+    assert results['A_group2']['p_value'] == 1, f"P-value {results['A_group2']['p_value']} should be close to 1 for identical groups"
+    print(f"Test passed: A candidates vs A candidates have high p-value: {results['A_group2']['p_value']:.6f}")
+
+def test_a_vs_aa_vote_difference_under_1000():
+    """Test if A candidates get more votes than Å candidates with p-value < 0.05"""
+    grouper = CandidateGrouping()
+    
+    # Add filters for party A and Å
+    grouper.add_filter(lambda c: c.party_code == 'A', name='A')
+    grouper.add_filter(lambda c: c.party_code == 'Å', name='Å')
+    
+    # Test the vote difference
+    results = grouper.test_filter_vote_difference('A')
+    
+    # Check if Å is in the results and has a p-value < 0.05
+    assert 'Å' in results, "Å group not found in results"
+    assert results['Å']['p_value'] is not None, "P-value for Å comparison is None"
+    assert results['Å']['p_value'] < 0.05, f"P-value {results['Å']['p_value']} is not < 0.05"
+    print(f"Test passed: A candidates get more votes than Å candidates (p-value: {results['Å']['p_value']:.6f})")    
+
 if __name__ == "__main__":
     
     test_katrine_kjaer_robsue_votes()
@@ -75,3 +147,7 @@ if __name__ == "__main__":
     test_mattias_tesfaye_votes()
     test_pelle_dragsted_votes()
     test_mette_frederiksen_votes()
+    test_a_vs_aa_vote_difference()
+    test_a_vs_a_same_party()
+    test_a_vs_a_same_party_under1000()
+    test_a_vs_aa_vote_difference_under_1000()

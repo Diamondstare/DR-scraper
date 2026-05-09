@@ -2,13 +2,13 @@ import csv
 import math
 import re
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Any, TypeVar
+from typing import Callable, Any, Dict, List, Optional, Tuple
 from scipy import stats
 from functools import wraps
+import matplotlib.pyplot as plt
 
-from dataclasses import field
 
 @dataclass
 class candidate:
@@ -16,10 +16,19 @@ class candidate:
     votes: int
     storkreds: str
     name: str = ""
-    adtional_values: dict[str, Any] = field(default_factory=dict)
+    additional_values: dict[str, Any] = field(default_factory=dict)
 
     def __str__(self):
         return self.name
+
+    def copy(self):
+        return candidate(
+            party_code=self.party_code,
+            votes=self.votes,
+            storkreds=self.storkreds,
+            name=self.name,
+            additional_values=self.additional_values.copy()
+        )
 
 
 def filter_candidate(func):
@@ -32,13 +41,246 @@ def filter_candidate(func):
     return wrapper
 
 
+def add_additional_values(func):
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        result = func(self, *args, **kwargs)
+        result.additional_values = self.additional_values
+        return result
+    return wrapper
+
+
+def handle_multiple_xml_paths(func):
+    @wraps(func)
+    def wrapper(self, xml_paths, *args, **kwargs):
+        if isinstance(xml_paths, list):
+            for xml_path in xml_paths:
+                result = func(self, xml_path, *args, **kwargs)
+                if result:
+                    return result
+            return ""
+        else:
+            return func(self, xml_paths, *args, **kwargs)
+    return wrapper
+
+
+class Filter:
+    def __init__(self, name: str, filter_func: Callable):
+        self.name = name
+        self.filter_func = filter_func
+    
+    def __call__(self, candidate):
+        return self.filter_func(candidate)
+
+class CandidateGrouping:
+    def __init__(self, xml_reader_instance=None, additional_values: Optional[Dict[str, Callable]] = None, global_filter: Filter = Filter("standart_filter",lambda c: c.votes <= 1000), filters=None):
+        """
+        Initialize with an XML reader and additional values
+        Args:
+            xml_reader_instance: An XML reader object that provides candidate data
+            additional_values: Dictionary of {name: value_func} where value_func
+                             takes a candidate and returns computed value
+            global_filter: Filter function for candidates (default: votes <= 1000)
+            filters: List of Filter objects to initialize with
+        """
+        if xml_reader_instance is None:
+            xml_reader_instance = xml_reader(filter=global_filter, additional_values=additional_values)
+        else: 
+            for val_names in additional_values.keys():
+                xml_reader_instance.add_adtional_value(val_names,additional_values[val_names])
+        self.xml_reader = xml_reader_instance
+        self.filters = filters or []
+        self.additional_values = additional_values or {}
+
+    def add_filter(self, Filter):
+        """
+        Add a boolean filter function with optional name
+        Args:
+            filter_func: A function that takes a candidate and returns bool
+            name: Optional name for this filter group (default: filter_func.__name__)
+        """
+        self.filters.append(Filter)
+
+    def get_candidates(self) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Get candidates split into groups based on which filters they pass
+        Returns:
+            Dictionary with filter names as keys and lists of candidates as values
+            Each candidate includes original data plus computed additional values
+        """
+        # Initialize result dictionary with empty lists for each filter
+        result = {f.name: [] for f in self.filters}
+  # Candidates that don't pass any filter
+
+        for candidate in self.xml_reader:
+            # Check which filters this candidate passes
+            passed_filters = []
+            for filter_obj in self.filters:
+                if filter_obj(candidate):
+                    passed_filters.append(filter_obj.name)
+
+            # Add to appropriate groups
+            if passed_filters:
+                for filter_name in passed_filters:
+                    result[filter_name].append({'candidate': candidate})
+
+  
+
+        return result
+
+    def plot(self, y_axis: str = "log_votes", use_log: bool = False, colors: Optional[Dict[str, str]] = None):
+        """
+        Plot candidates based on the specified y-axis variable
+        Args:
+            y_axis: Variable to plot on y-axis (can be 'votes', 'log_votes', or any additional value key)
+            use_log: Whether to use logarithmic scale for the y-axis
+            colors: Dictionary mapping party codes to colors (default: Danish party colors)
+        """
+        # Default Danish party colors (from Wikipedia)
+        danish_party_colors = {
+            'A': '#AF0D0D',  # Socialdemokraterne
+            'V': '#01438E',  # Venstre
+            'C': '#729B0D',  # Konservative
+            'B': '#7A1898',  # Radikale Venstre
+            'F': '#D91E18',  # Socialistisk Folkeparti
+            'O': '#FCD03B',  # Dansk Folkeparti
+            'Ø': '#F7660D',  # Enhedslisten
+            'I': '#3FB2BE',  # Liberal Alliance
+            'Å': '#00FF00',  # Alternativet
+            'M': '#B48CD2',  # Moderaterne
+            'Æ': "#6285aa",
+            'H': "#11044D"
+            
+        }
+        
+        default_colors = colors or danish_party_colors
+        
+        results = self.get_candidates()
+        
+        plt.figure(figsize=(10, 6))
+        
+        # Create legend handles for each party
+        legend_handles = []
+        party_colors = {}
+        
+        for filter_name, candidates in results.items():
+             if not candidates:
+                 continue
+             
+             x_values = []
+             y_values = []
+             candidate_colors = []
+             
+             for candidate_data in candidates:
+                 cand = candidate_data['candidate']
+                 x_values.append(filter_name)
+                 
+                 if y_axis == "votes":
+                     y_value = cand.votes
+                 elif y_axis == "log_votes":
+                     y_value = math.log(cand.votes) if cand.votes > 0 else 0
+                 elif y_axis in cand.additional_values.keys():
+                     y_value = cand.additional_values[y_axis]
+                 else:
+                     raise ValueError(f"Unknown y_axis variable: {y_axis}")
+                 
+                 y_values.append(y_value)
+                 
+                 # Get color based on party code
+                 party_color = default_colors.get(cand.party_code, '#808080')  # Default to gray
+                 candidate_colors.append(party_color)
+                 
+                 # Track party colors for legend
+                 if cand.party_code not in party_colors:
+                     party_colors[cand.party_code] = party_color
+             
+             plt.scatter(x_values, y_values, alpha=0.6, c=candidate_colors)
+        
+         # Add legend entries for each party
+        for party_code, color in party_colors.items():
+             legend_handles.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color, markersize=8, label=f"{party_code}"))
+         
+        if use_log:
+             plt.yscale('log')
+          
+        plt.xlabel('Filter Group')
+        plt.ylabel(y_axis)
+        plt.title(f'Candidate {y_axis} by Filter Group')
+        plt.legend(handles=legend_handles)
+        plt.xticks(rotation=45, ha='right')
+        plt.tight_layout()
+        plt.show()
+
+    def test_filter_vote_difference(self, filter_name: str) -> Dict[str, Any]:
+        """
+        Test if people from the given filter group get more votes than other groups
+        Args:
+            filter_name: Name of the filter to test against others
+        Returns:
+            Dictionary with p-values for comparisons between the specified filter group and all other groups
+        """
+        results = self.get_candidates()
+        
+        if filter_name not in results or not results[filter_name]:
+            raise ValueError(f"Filter '{filter_name}' not found or has no candidates")
+        
+        # Get votes for the specified filter group
+        filter_group_votes = [cand['candidate'].votes for cand in results[filter_name]]
+        
+        p_values = {}
+        
+        # Compare with each other group
+        for other_group_name, other_candidates in results.items():
+            if other_group_name == filter_name or not other_candidates:
+                continue
+            
+            other_group_votes = [cand['candidate'].votes for cand in other_candidates]
+            
+            # Perform t-test
+            try:
+                t_statistic, p_value = stats.ttest_ind(
+                    filter_group_votes,
+                    other_group_votes,
+                    equal_var=False
+                )
+                p_values[other_group_name] = {
+                    'p_value': p_value,
+                    't_statistic': t_statistic,
+                    'filter_mean': sum(filter_group_votes) / len(filter_group_votes) if filter_group_votes else 0,
+                    'other_mean': sum(other_group_votes) / len(other_group_votes) if other_group_votes else 0,
+                    'filter_count': len(filter_group_votes),
+                    'other_count': len(other_group_votes)
+                }
+            except (ValueError, ZeroDivisionError):
+                # Handle cases where t-test cannot be performed
+                p_values[other_group_name] = {
+                    'p_value': None,
+                    't_statistic': None,
+                    'filter_mean': sum(filter_group_votes) / len(filter_group_votes) if filter_group_votes else 0,
+                    'other_mean': sum(other_group_votes) / len(other_group_votes) if other_group_votes else 0,
+                    'filter_count': len(filter_group_votes),
+                    'other_count': len(other_group_votes),
+                    'error': 'Insufficient data for t-test'
+                }
+        
+        return p_values
+
+
 class xml_reader():
-    def __init__(self,filter=lambda x:True):
+    def __init__(self, filter=lambda x: True, additional_values=None):
         self.__voting_place_reults = {}
         self.__all_candidate_names_cache = None
         self.__candidate_cache = {}
-        self.__filter=filter
-        
+        self.__filter = filter
+        self.additional_values = additional_values or {}
+
+    def add_adtional_value(self,key,func):
+        self.additional_values[key]=func
+
+    def __iter__(self):
+        for name in self.get_all_candidate_names():
+            yield self.get_candidate(name)
+   
     def get_candidate_votes(self, candidate):
         total_votes = 0
         base_path = Path("Data/dst_xml_downloads/Afstemningsomraader")
@@ -53,22 +295,115 @@ class xml_reader():
 
     def get_all_candidate_names(self):
         if self.__all_candidate_names_cache is not None:
+            print(self.__all_candidate_names_cache)
             return self.__all_candidate_names_cache
         
-        all_names = set()
+        # Dictionary to accumulate votes and store candidate data
+        candidate_data = {}
         base_path = Path("Data/dst_xml_downloads/Afstemningsomraader")
         
         for voting_place_dir in base_path.iterdir():
             if voting_place_dir.is_dir():
-                votes_by_name = self.__read_voting_place(voting_place_dir.name)
-                for name in votes_by_name.keys():
-                    if self.__filter(name):
-                        all_names.add(name)
+                xml_paths = self.__voting_place_to_xml(voting_place_dir.name)
+                for xml_path in xml_paths:
+                    self.__process_xml_file_for_candidates(xml_path, candidate_data)
         
-        self.__all_candidate_names_cache = list(all_names)
+        # Create all candidate objects and cache them
+        filtered_names = []
+        for normalized_name, data in candidate_data.items():
+            
+                # Create candidate object
+                candidate_instance = candidate(
+                    party_code=data['party_code'],
+                    votes=data['votes'],
+                    storkreds=data['storkreds'],
+                    name=normalized_name
+                )
+                
+                # Apply filter and cache if it passes
+                temp_candidate=candidate_instance.copy()
+                temp_candidate.additional_values=self.additional_values
+                if self.__filter(temp_candidate):
+                    self.__candidate_cache[normalized_name] = candidate_instance
+                    filtered_names.append(normalized_name)
+            
+                # Skip candidates that can't be created or don't pass filter
+                
+        
+        self.__all_candidate_names_cache = filtered_names
         return self.__all_candidate_names_cache
-
-    @filter_candidate
+    
+    def __process_xml_file_for_candidates(self, xml_path, candidate_data):
+        """Process an XML file to extract and accumulate candidate data"""
+        try:
+            tree = ET.parse(xml_path)
+            root = tree.getroot()
+        except ET.ParseError as e:
+            print(f"Skipping invalid XML: {xml_path} ({e})")
+            return
+        
+        # First pass: extract party codes and storkreds from Parti elements
+        party_info = {}
+        for elem in root.iter():
+            if self.__local_name(elem.tag) == "Parti":
+                party_code = elem.attrib.get("Bogstav", "")
+                for person_elem in elem:
+                    if self.__local_name(person_elem.tag) == "Person":
+                        name = extract_candidate_name(person_elem)
+                        if name:
+                            normalized_name = self.__normalize_name(name)
+                            party_info[normalized_name] = party_code
+            
+            elif self.__local_name(elem.tag) == "Sted":
+                sted_type = elem.attrib.get("Type", "")
+                sted_text = elem.text or ""
+                storkreds = f"{sted_type}: {sted_text}" if sted_type else sted_text
+                for child in elem.iter():
+                    if self.__local_name(child.tag) == "Person":
+                        name = extract_candidate_name(child)
+                        if name:
+                            normalized_name = self.__normalize_name(name)
+                            if normalized_name not in party_info:
+                                party_info[normalized_name] = ""
+        
+        # Second pass: extract votes and create candidate data
+        for elem in root.iter():
+            if self.__local_name(elem.tag) == "Person":
+                name = extract_candidate_name(elem)
+                if name:
+                    normalized_name = self.__normalize_name(name)
+                    votes = extract_person_votes(elem)
+                    
+                    # Initialize candidate data if not exists
+                    if normalized_name not in candidate_data:
+                        candidate_data[normalized_name] = {
+                            'votes': 0,
+                            'party_code': party_info.get(normalized_name, ""),
+                            'storkreds': ""
+                        }
+                    
+                    # Accumulate votes
+                    candidate_data[normalized_name]['votes'] += votes
+                    
+                    # Set party code if available
+                    if not candidate_data[normalized_name]['party_code'] and normalized_name in party_info:
+                        candidate_data[normalized_name]['party_code'] = party_info[normalized_name]
+            
+            elif self.__local_name(elem.tag) == "Parti":
+                if "Bogstav" not in elem.attrib:
+                    parti_name = elem.attrib.get("navn", "")
+                    if parti_name:
+                        normalized_parti_name = self.__normalize_name(parti_name)
+                        votes = int(elem.attrib.get("PersonligeStemmer", "0"))
+                        if normalized_parti_name not in candidate_data:
+                            candidate_data[normalized_parti_name] = {
+                                'votes': 0,
+                                'party_code': "",
+                                'storkreds': ""
+                            }
+                        candidate_data[normalized_parti_name]['votes'] += votes
+    #TODO apply filter
+    @add_additional_values
     def get_candidate(self, candidate_name):
         normalized_name = self.__normalize_name(candidate_name)
         if normalized_name in self.__candidate_cache:
@@ -77,7 +412,7 @@ class xml_reader():
         votes = self.get_candidate_votes(candidate_name)
         party_code = self.__get_candidate_party_code(normalized_name)
         storkreds = self.__get_candidate_storkreds(normalized_name)
-        candidate_instance = candidate(party_code=party_code, votes=votes, storkreds=storkreds,name=normalized_name)
+        candidate_instance = candidate(party_code=party_code, votes=votes, storkreds=storkreds, name=normalized_name)
         self.__candidate_cache[normalized_name] = candidate_instance
         return candidate_instance
     
@@ -151,6 +486,7 @@ class xml_reader():
 
         return points
 
+    @handle_multiple_xml_paths
     def __extract_candidate_party_code(self, xml_path: Path, normalized_candidate_name: str) -> str:
         try:
             tree = ET.parse(xml_path)
@@ -187,6 +523,7 @@ class xml_reader():
         
         return ""
 
+    @handle_multiple_xml_paths
     def __extract_candidate_storkreds(self, xml_path: Path, normalized_candidate_name: str) -> str:
         try:
             tree = ET.parse(xml_path)
@@ -198,9 +535,8 @@ class xml_reader():
         for sted_elem in root.iter():
             if self.__local_name(sted_elem.tag) == "Sted":
                 return sted_elem.attrib.get("Type", "") + ": " + sted_elem.text or ""
-        
-        return ""
-    
+            return ""
+
     def __normalize_name(self,name: str) -> str:
         name = name.strip()
         name = name.replace(".", "")
@@ -211,20 +547,6 @@ class xml_reader():
         if "}" in tag:
             return tag.split("}", 1)[1]
         return tag
-T = TypeVar('T')
-
-
-@dataclass
-class Point:
-    x: int
-    y: float
-    label: str
-    party_code: str
-
-
-def read_csv_rows(csv_path: Path) -> list[dict[str, str]]:
-    with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
-        return list(csv.DictReader(f))
 
 
 def extract_person_votes(elem: ET.Element) -> int:
@@ -241,314 +563,38 @@ def extract_candidate_name(elem: ET.Element) -> str:
     return (elem.attrib.get("Navn", "") or "").strip()
 
 
+class CSVAnswerReader:
+    def __init__(self, csv_path: Path = Path("Data/Output_renset.csv")):
+        self.csv_path = csv_path
+        self.csv_data = self._load_csv_data()
+
+    def _load_csv_data(self) -> List[Dict[str, str]]:
+        with self.csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+            return list(csv.DictReader(f))
+
+    def get_answers_for_candidate(self, candidate: candidate) -> Dict[str, int]:
+        full_name = f"{candidate.name}"
+        for row in self.csv_data:
+            first_name = (row.get("first_name") or "").strip()
+            last_name = (row.get("last_name") or "").strip()
+            row_full_name = f"{first_name} {last_name}"
+            if normalize_name(row_full_name) == normalize_name(full_name):
+                return {f"Q{i}": int(row.get(f"Q{i}", 0)) for i in range(1, 26)}
+        return {}
+
+    def __call__(self, f_1: Callable[[Dict[str, int]], Any]) -> Callable[[candidate], Any]:
+        def f_2(candidate: candidate) -> Any:
+            answers = self.get_answers_for_candidate(candidate)
+            return f_1(answers)
+        return f_2
+
+
+def normalize_name(name: str) -> str:
+    name = name.strip()
+    name = name.replace(".", "")
+    name = name.replace(",", "")
+    name = re.sub(r"\s+", " ", name)
+    return name.casefold()
 
 
-def build_points(
-    csv_rows: list[dict[str, str]],
-    votes_by_name: dict[str, int],
-    group_splitter: Callable[[dict[str, str]], bool],
-) -> list[Point]:
-    points: list[Point] = []
 
-    for row in csv_rows:
-        first_name = (row.get("first_name") or "").strip()
-        last_name = (row.get("last_name") or "").strip()
-        answers_text = (row.get("answers") or "").strip()
-        party_code = (row.get("party_code") or "").strip()
-
-        if not first_name and not last_name:
-            continue
-
-        question3 = extract_question3_answer(answers_text)
-        if question3 is None:
-            continue
-
-        full_name = normalize_name(f"{first_name} {last_name}")
-        votes = votes_by_name.get(full_name)
-
-        if votes is None:
-            continue
-
-        x = question3
-        y = votes
-        label = f"{first_name} {last_name}"
-
-        group = group_splitter(row)
-
-        points.append(Point(x=x, y=y, label=label, party_code=party_code))
-
-    return points
-
-
-def extract_question3_answer(answers_text: str):
-    answers = answers_text.split()
-    if len(answers) < 3:
-        return None
-
-    try:
-        return int(answers[1])
-    except ValueError:
-        return None
-
-
-def filter_candidates_by_votes(
-    csv_rows: list[dict[str, str]],
-    votes_by_name: dict[str, int],
-    max_votes: int = 1000,
-) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    """
-    Split candidates into two groups based on vote count.
-    Group 1: Candidates with votes <= max_votes
-    Group 2: Candidates with votes > max_votes
-    """
-    group1: list[dict[str, str]] = []
-    group2: list[dict[str, str]] = []
-
-    for row in csv_rows:
-        first_name = (row.get("first_name") or "").strip()
-        last_name = (row.get("last_name") or "").strip()
-
-        if not first_name and not last_name:
-            continue
-
-        full_name = normalize_name(f"{first_name} {last_name}")
-        votes = votes_by_name.get(full_name, 0)
-
-        if votes <= max_votes:
-            group1.append(row)
-        else:
-            group2.append(row)
-
-    return group1, group2
-
-
-def split_by_question3_answer(
-    csv_rows: list[dict[str, str]],
-) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    """
-    Split candidates into two groups based on their answer to question 3.
-    Group 1: Candidates who answered 1 or 2
-    Group 2: Candidates who answered 4 or 5
-    """
-    group1: list[dict[str, str]] = []
-    group2: list[dict[str, str]] = []
-
-    for row in csv_rows:
-        answers_text = (row.get("answers") or "").strip()
-        question3 = extract_question3_answer(answers_text)
-
-        if question3 is None:
-            continue
-
-        if question3 in [1, 2]:
-            group1.append(row)
-        elif question3 in [4, 5]:
-            group2.append(row)
-
-    return group1, group2
-
-
-def split_by_party(
-    csv_rows: list[dict[str, str]],
-    votes_by_name: dict[str, int],
-    target_parties: list[str] = None,
-) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    """
-    Split candidates into two groups based on party affiliation.
-    Group 1: Candidates from the target parties (A, V, O by default)
-    Group 2: Candidates from other parties
-    Only considers candidates with <= 1000 total votes.
-    """
-    if target_parties is None:
-        target_parties = ["A", "V", "O", "F"]
-
-    group1: list[dict[str, str]] = []
-    group2: list[dict[str, str]] = []
-
-    for row in csv_rows:
-        first_name = (row.get("first_name") or "").strip()
-        last_name = (row.get("last_name") or "").strip()
-
-        if not first_name and not last_name:
-            continue
-
-        full_name = normalize_name(f"{first_name} {last_name}")
-        votes = votes_by_name.get(full_name, 0)
-
-        if votes > 1000:
-            continue
-
-        party_code = (row.get("party_code") or "").strip()
-
-        if party_code in target_parties:
-            group1.append(row)
-        else:
-            group2.append(row)
-
-    return group1, group2
-
-
-def split_by_answer_frequency(
-    csv_rows: list[dict[str, str]],
-    votes_by_name: dict[str, int],
-) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    """
-    Split candidates into two groups based on the frequency of their answers to question 3.
-    Group 1: Candidates with more than 5 answers of 1 or 5
-    Group 2: Candidates with 5 or fewer answers of 1 or 5
-    Only considers candidates with <= 1000 total votes.
-    """
-    group1: list[dict[str, str]] = []
-    group2: list[dict[str, str]] = []
-
-    for row in csv_rows:
-        first_name = (row.get("first_name") or "").strip()
-        last_name = (row.get("last_name") or "").strip()
-
-        if not first_name and not last_name:
-            continue
-
-        full_name = normalize_name(f"{first_name} {last_name}")
-        votes = votes_by_name.get(full_name, 0)
-
-        if votes > 1000:
-            continue
-
-        answers_text = (row.get("answers") or "").strip()
-        answers = answers_text.split()
-
-        if len(answers) < 3:
-            continue
-
-        try:
-            question3 = int(answers[1])
-        except ValueError:
-            continue
-
-        count_1_or_5 = sum(1 for ans in answers if ans in ["1", "5"])
-
-        if count_1_or_5 > 5:
-            group1.append(row)
-        else:
-            group2.append(row)
-
-    return group1, group2
-
-
-def compare_groups_statistically(
-    group1_points: list[Point],
-    group2_points: list[Point],
-) -> dict[str, Any]:
-    """
-    Compare two groups of points statistically.
-    Returns a dictionary with comparison results.
-    """
-    results = {
-        "group1_size": len(group1_points),
-        "group2_size": len(group2_points),
-    }
-
-    if not group1_points or not group2_points:
-        return results
-
-    group1_ys = [p.y for p in group1_points]
-    group2_ys = [p.y for p in group2_points]
-
-    mean1 = sum(group1_ys) / len(group1_ys)
-    mean2 = sum(group2_ys) / len(group2_ys)
-
-    results["mean_group1"] = mean1
-    results["mean_group2"] = mean2
-    results["mean_difference"] = mean1 - mean2
-
-    # Calculate standard deviations
-    std1 = math.sqrt(sum((y - mean1) ** 2 for y in group1_ys) / len(group1_ys)) if group1_ys else 0
-    std2 = math.sqrt(sum((y - mean2) ** 2 for y in group2_ys) / len(group2_ys)) if group2_ys else 0
-
-    results["std_group1"] = std1
-    results["std_group2"] = std2
-
-    # Calculate t-statistic and p-value
-    n1, n2 = len(group1_ys), len(group2_ys)
-    if n1 + n2 < 2:
-        t_statistic = 0
-        p_value = 1.0
-    else:
-        pooled_std = math.sqrt(((n1 - 1) * std1 ** 2 + (n2 - 1) * std2 ** 2) / (n1 + n2 - 2))
-        t_statistic = (mean1 - mean2) / (pooled_std * math.sqrt(1 / n1 + 1 / n2)) if pooled_std != 0 else 0
-        
-        # Calculate two-tailed p-value
-        p_value = stats.t.sf(abs(t_statistic), df=n1 + n2 - 2) * 2
-
-    results["t_statistic"] = t_statistic
-    results["p_value"] = p_value
-
-    return results
-
-    group1_ys = [p.y for p in group1_points]
-    group2_ys = [p.y for p in group2_points]
-
-    mean1 = sum(group1_ys) / len(group1_ys) if group1_ys else 0
-    mean2 = sum(group2_ys) / len(group2_ys) if group2_ys else 0
-
-    results["mean_group1"] = mean1
-    results["mean_group2"] = mean2
-    results["mean_difference"] = mean1 - mean2
-
-    # Calculate standard deviations
-    std1 = math.sqrt(sum((y - mean1) ** 2 for y in group1_ys) / len(group1_ys)) if group1_ys else 0
-    std2 = math.sqrt(sum((y - mean2) ** 2 for y in group2_ys) / len(group2_ys)) if group2_ys else 0
-
-    results["std_group1"] = std1
-    results["std_group2"] = std2
-
-    # Calculate t-statistic (simplified)
-    n1, n2 = len(group1_ys), len(group2_ys)
-    if n1 + n2 < 2:
-        t_statistic = 0
-    else:
-        pooled_std = math.sqrt(((n1 - 1) * std1 ** 2 + (n2 - 1) * std2 ** 2) / (n1 + n2 - 2))
-        t_statistic = (mean1 - mean2) / (pooled_std * math.sqrt(1 / n1 + 1 / n2)) if pooled_std != 0 else 0
-
-    results["t_statistic"] = t_statistic
-
-    return results
-
-
-def create_group_comparison_report(
-    group1_points: list[Point],
-    group2_points: list[Point],
-    group1_name: str = "Group 1",
-    group2_name: str = "Group 2",
-) -> str:
-    """
-    Create a human-readable report comparing two groups.
-    """
-    stats = compare_groups_statistically(group1_points, group2_points)
-
-    report_lines = []
-    report_lines.append(f"Group Comparison Report")
-    report_lines.append(f"{group1_name}: {stats['group1_size']} candidates")
-    report_lines.append(f"{group2_name}: {stats['group2_size']} candidates")
-    report_lines.append("")
-    report_lines.append("Statistics:")
-    report_lines.append(f"  Mean {group1_name}: {stats['mean_group1']:.4f}")
-    report_lines.append(f"  Mean {group2_name}: {stats['mean_group2']:.4f}")
-    report_lines.append(f"  Difference: {stats['mean_difference']:.4f}")
-    report_lines.append("")
-    report_lines.append("Standard Deviations:")
-    report_lines.append(f"  {group1_name}: {stats['std_group1']:.4f}")
-    report_lines.append(f"  {group2_name}: {stats['std_group2']:.4f}")
-    report_lines.append("")
-    report_lines.append(f"T-statistic: {stats['t_statistic']:.4f}")
-    report_lines.append(f"P-value: {stats['p_value']:.4f}")
-
-    if stats['p_value'] < 0.05:
-        if stats['t_statistic'] > 0:
-            report_lines.append(f"Conclusion: {group1_name} has significantly higher average votes (p < 0.05)")
-        elif stats['t_statistic'] < 0:
-            report_lines.append(f"Conclusion: {group2_name} has significantly higher average votes (p < 0.05)")
-    else:
-        report_lines.append("Conclusion: No significant difference (p >= 0.05)")
-
-    return "\n".join(report_lines)
